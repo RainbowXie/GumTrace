@@ -21,7 +21,7 @@ typedef enum {
     _GUM_OPTIONS_DEBUG = 1 << 0
 } _GUM_OPTIONS;
 
-#define BUFFER_SIZE (1024 * 1024 * 1)
+#define BUFFER_SIZE (1024 * 1024 * 10)
 
 struct FUNC_CONTEXT {
     uint64_t address;

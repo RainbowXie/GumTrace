@@ -162,6 +162,11 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
             __uint128_t index = 0;
             bool flag = true;
 
+            if (is_first_print) {
+                is_first_print = false;
+                Utils::append_string(buff, buff_n, "; ");
+            }
+
             if (op.mem.base != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.base, cpu_context, base);
                 const char *base_reg_name = cs_reg_name(callback_ctx->handle, op.mem.base);
