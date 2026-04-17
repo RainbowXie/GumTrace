@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+echo "Cross-building for iOS on Linux..."
+
+rm -rf build_ios
+
+mkdir -p build_ios
+cd build_ios
+
+PROJECTS_ROOT="${PROJECTS_ROOT:?PROJECTS_ROOT is required}"
+PROJECTS_ROOT="${PROJECTS_ROOT%/}"
+OSXCROSS_ROOT="${OSXCROSS_ROOT:-${PROJECTS_ROOT}/osxcross}"
+OSXCROSS_TARGET_ROOT="${OSXCROSS_TARGET_ROOT:-${OSXCROSS_ROOT}/target}"
+OSXCROSS_BIN="${OSXCROSS_BIN:-${OSXCROSS_TARGET_ROOT}/bin}"
+OSXCROSS_LD="${OSXCROSS_LD:-${OSXCROSS_BIN}/arm64-apple-darwin25-ld}"
+OSXCROSS_INSTALL_NAME_TOOL="${OSXCROSS_INSTALL_NAME_TOOL:-${OSXCROSS_BIN}/arm64-apple-darwin25-install_name_tool}"
+IOS_SDK_PATH="${IOS_SDK_PATH:-${PROJECTS_ROOT}/iPhoneOS16.1.sdk}"
+IOS_TARGET="${IOS_TARGET:-arm64-apple-ios16.0}"
+BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
+
+export IOS_TARGET IOS_SDK_PATH OSXCROSS_INSTALL_NAME_TOOL
+
+cmake .. \
+    -DCMAKE_SYSTEM_NAME=iOS \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=/usr/bin/clang \
+    -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+    -DCMAKE_OBJCXX_COMPILER=/usr/bin/clang++ \
+    -DCMAKE_C_COMPILER_TARGET="${IOS_TARGET}" \
+    -DCMAKE_CXX_COMPILER_TARGET="${IOS_TARGET}" \
+    -DCMAKE_OBJCXX_COMPILER_TARGET="${IOS_TARGET}" \
+    -DCMAKE_INSTALL_NAME_TOOL="${OSXCROSS_INSTALL_NAME_TOOL}" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=${OSXCROSS_LD}" \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+    -DCMAKE_OSX_SYSROOT="${IOS_SDK_PATH}" \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+cmake --build . --config Release -j"${BUILD_JOBS}"
+
+echo "Linux iOS cross-build complete. Output is in build_ios/"

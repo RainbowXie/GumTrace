@@ -71,6 +71,20 @@ ret: 0xffffffffffffffff
 # 产物: build_ios/libGumTrace.dylib
 ```
 
+如果你是在 Linux 主机上交叉编译 iOS 版本，当前仓库已经支持以下组合：
+
+- 系统 `clang` / `clang++`
+- 本地 `iPhoneOS.sdk`
+- `osxcross` 提供的 `arm64-apple-darwin25-ld`
+
+最小调用方式：
+
+```bash
+PROJECTS_ROOT=/path/to/your/projects ./linux_crossbuild_ios.sh
+```
+
+完整流程见 [docs/linux-ios-cross-compile.md](docs/linux-ios-cross-compile.md)。
+
 ### 构建污点分析工具
 
 ```bash
@@ -227,4 +241,3 @@ GumTrace 内置了对常见库函数参数的自动解析：
 - 跳过原子指令（LSE、独占加载/存储）以避免 Stalker 插桩导致的死锁
 - 使用 10MB 内存缓冲区减少文件 I/O 次数，提升追踪性能
 - 污点分析工具采用零分配解析设计，可高效处理 GB 级日志文件
-

@@ -1,4 +1,25 @@
 cmake_minimum_required(VERSION 3.10)
+
+if(DEFINED ENV{IOS_TARGET})
+    if(NOT DEFINED CMAKE_C_COMPILER_TARGET)
+        set(CMAKE_C_COMPILER_TARGET "$ENV{IOS_TARGET}" CACHE STRING "Target triple for the C compiler")
+    endif()
+    if(NOT DEFINED CMAKE_CXX_COMPILER_TARGET)
+        set(CMAKE_CXX_COMPILER_TARGET "$ENV{IOS_TARGET}" CACHE STRING "Target triple for the C++ compiler")
+    endif()
+    if(NOT DEFINED CMAKE_OBJCXX_COMPILER_TARGET)
+        set(CMAKE_OBJCXX_COMPILER_TARGET "$ENV{IOS_TARGET}" CACHE STRING "Target triple for the Objective-C++ compiler")
+    endif()
+endif()
+
+if(NOT DEFINED CMAKE_OSX_SYSROOT AND DEFINED ENV{IOS_SDK_PATH})
+    set(CMAKE_OSX_SYSROOT "$ENV{IOS_SDK_PATH}" CACHE PATH "Path to the iPhoneOS SDK")
+endif()
+
+if(NOT DEFINED CMAKE_INSTALL_NAME_TOOL AND DEFINED ENV{OSXCROSS_INSTALL_NAME_TOOL})
+    set(CMAKE_INSTALL_NAME_TOOL "$ENV{OSXCROSS_INSTALL_NAME_TOOL}" CACHE FILEPATH "Path to install_name_tool")
+endif()
+
 project(GumTrace CXX)
 
 set(CMAKE_CXX_STANDARD 11)
@@ -35,24 +56,33 @@ else()
 
     enable_language(OBJCXX)
 
-    execute_process(
-            COMMAND xcode-select -p
-            OUTPUT_VARIABLE DEVELOPER_DIR
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(NOT DEVELOPER_DIR)
-        message(FATAL_ERROR "Unable to locate Xcode developer directory")
+    if(NOT CMAKE_OSX_SYSROOT)
+        execute_process(
+                COMMAND xcode-select -p
+                OUTPUT_VARIABLE DEVELOPER_DIR
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+        )
+        if(DEVELOPER_DIR)
+            set(CMAKE_XCODE_DEVELOPER_DIR ${DEVELOPER_DIR})
+            execute_process(
+                    COMMAND /usr/bin/env DEVELOPER_DIR=${DEVELOPER_DIR} xcrun --sdk iphoneos --show-sdk-path
+                    OUTPUT_VARIABLE IOS_SDK_PATH
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET
+            )
+        else()
+            execute_process(
+                    COMMAND xcrun --sdk iphoneos --show-sdk-path
+                    OUTPUT_VARIABLE IOS_SDK_PATH
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET
+            )
+        endif()
+        set(CMAKE_OSX_SYSROOT ${IOS_SDK_PATH})
+    else()
+        set(IOS_SDK_PATH ${CMAKE_OSX_SYSROOT})
     endif()
-
-    set(CMAKE_XCODE_DEVELOPER_DIR ${DEVELOPER_DIR})
-
-    execute_process(
-            COMMAND /usr/bin/env DEVELOPER_DIR=${DEVELOPER_DIR} xcrun --sdk iphoneos --show-sdk-path
-            OUTPUT_VARIABLE IOS_SDK_PATH
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-
-    set(CMAKE_OSX_SYSROOT ${IOS_SDK_PATH})
     message(STATUS "iOS SDK Path: ${IOS_SDK_PATH}")
 
     set_source_files_properties(${GUMTRACE_SOURCES} PROPERTIES LANGUAGE OBJCXX)
@@ -87,7 +117,18 @@ else()
 
     target_link_libraries(GumTrace
             ${CMAKE_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a
-            "-framework Foundation"
-            "-framework CoreFoundation"
     )
+
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(GumTrace PRIVATE
+                -undefined dynamic_lookup
+        )
+    else()
+        target_link_libraries(GumTrace
+                "-framework Foundation"
+                "-framework CoreFoundation"
+        )
+    endif()
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -ObjC++")
 endif()
