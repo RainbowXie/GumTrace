@@ -92,6 +92,16 @@ extern "C" __attribute__((visibility("default")))
 void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OPTIONS* options) {
 
     gum_init();
+    auto code_signing_policy = gum_process_get_code_signing_policy();
+    LOGE("Gum code signing policy before init: %s",
+         gum_code_signing_policy_to_string(code_signing_policy));
+#if PLATFORM_IOS
+    if (code_signing_policy != GUM_CODE_SIGNING_OPTIONAL) {
+        gum_process_set_code_signing_policy(GUM_CODE_SIGNING_OPTIONAL);
+        LOGE("Gum code signing policy forced to: %s",
+             gum_code_signing_policy_to_string(gum_process_get_code_signing_policy()));
+    }
+#endif
 
     GumTrace *instance = GumTrace::get_instance();
     memcpy(&instance->options, options, sizeof(GUM_OPTIONS));
