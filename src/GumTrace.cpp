@@ -70,7 +70,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
                     Utils::append_string(buff, buff_n, "-> ");
                 }
 
-                const char *reg_name = cs_reg_name(callback_ctx->handle, self->write_reg_list.regs[i]);
+                const char *reg_name = Utils::get_arm64_reg_name(self->write_reg_list.regs[i]);
                 Utils::append_string(buff, buff_n, reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(reg_value, buff_n, buff);
@@ -127,7 +127,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
         if ((op.access & CS_AC_READ) && (op.access & CS_AC_WRITE) && op.type == ARM64_OP_REG) {
             if (Utils::get_register_value(op.reg, cpu_context, reg_value)) {
 
-                const char *reg_name = cs_reg_name(callback_ctx->handle, op.reg);
+                const char *reg_name = Utils::get_arm64_reg_name(op.reg);
                 Utils::append_string(buff, buff_n, reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(reg_value, buff_n, buff);
@@ -138,7 +138,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
         } else if (op.access & CS_AC_READ && op.type == ARM64_OP_REG) {
             if (Utils::get_register_value(op.reg, cpu_context, reg_value)) {
 
-                const char *reg_name = cs_reg_name(callback_ctx->handle, op.reg);
+                const char *reg_name = Utils::get_arm64_reg_name(op.reg);
                 Utils::append_string(buff, buff_n, reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(reg_value, buff_n, buff);
@@ -151,7 +151,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
 
             if (op.mem.base != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.base, cpu_context, base);
-                const char *base_reg_name = cs_reg_name(callback_ctx->handle, op.mem.base);
+                const char *base_reg_name = Utils::get_arm64_reg_name(op.mem.base);
                 Utils::append_string(buff, buff_n, base_reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(base, buff_n, buff);
@@ -160,7 +160,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
 
             if (op.mem.index != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.index, cpu_context, index);
-                const char *index_reg_name = cs_reg_name(callback_ctx->handle, op.mem.index);
+                const char *index_reg_name = Utils::get_arm64_reg_name(op.mem.index);
                 Utils::append_string(buff, buff_n, index_reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(index, buff_n, buff);
@@ -186,7 +186,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
 
             if (op.mem.base != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.base, cpu_context, base);
-                const char *base_reg_name = cs_reg_name(callback_ctx->handle, op.mem.base);
+                const char *base_reg_name = Utils::get_arm64_reg_name(op.mem.base);
                 Utils::append_string(buff, buff_n, base_reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(base, buff_n, buff);
@@ -195,7 +195,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
 
             if (op.mem.index != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.index, cpu_context, index);
-                const char *index_reg_name = cs_reg_name(callback_ctx->handle, op.mem.index);
+                const char *index_reg_name = Utils::get_arm64_reg_name(op.mem.index);
                 Utils::append_string(buff, buff_n, index_reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(index, buff_n, buff);
@@ -216,7 +216,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
 
             if (op.mem.base != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.base, cpu_context, base);
-                const char *base_reg_name = cs_reg_name(callback_ctx->handle, op.mem.base);
+                const char *base_reg_name = Utils::get_arm64_reg_name(op.mem.base);
                 Utils::append_string(buff, buff_n, base_reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(base, buff_n, buff);
@@ -224,7 +224,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
             }
             if (op.mem.index != ARM64_REG_INVALID) {
                 flag = Utils::get_register_value(op.mem.index, cpu_context, index);
-                const char *index_reg_name = cs_reg_name(callback_ctx->handle, op.mem.index);
+                const char *index_reg_name = Utils::get_arm64_reg_name(op.mem.index);
                 Utils::append_string(buff, buff_n, index_reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(index, buff_n, buff);
@@ -241,7 +241,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
         } else if (op.access & CS_AC_WRITE && op.type == ARM64_OP_REG) {
             if (Utils::get_register_value(op.reg, cpu_context, reg_value)) {
 
-                const char *reg_name = cs_reg_name(callback_ctx->handle, op.reg);
+                const char *reg_name = Utils::get_arm64_reg_name(op.reg);
                 Utils::append_string(buff, buff_n, reg_name);
                 Utils::append_string(buff, buff_n, "=0x");
                 Utils::format_uint128_hex(reg_value, buff_n, buff);
@@ -350,8 +350,7 @@ void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput
         if (Utils::is_lse(p_insn) == false) {
             const auto& module = self->get_module_by_name(*module_name_ptr);
 
-            auto callback_ctx = self->callback_context_instance->pull(p_insn, gum_stalker_iterator_get_capstone(it),
-                                                                      module_name_ptr->c_str(), module.at("base"));
+            auto callback_ctx = self->callback_context_instance->pull(p_insn, module_name_ptr->c_str(), module.at("base"));
 
             gum_stalker_iterator_put_callout(it, callout_callback, callback_ctx, nullptr);
         }

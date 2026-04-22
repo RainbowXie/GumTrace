@@ -362,6 +362,67 @@ bool Utils::get_register_value(arm64_reg reg, _GumArm64CpuContext *ctx, __uint12
     return true;
 }
 
+const char *Utils::get_arm64_reg_name(arm64_reg reg) {
+    static thread_local char reg_name[16];
+
+    if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30) {
+        snprintf(reg_name, sizeof(reg_name), "w%d", reg - ARM64_REG_W0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28) {
+        snprintf(reg_name, sizeof(reg_name), "x%d", reg - ARM64_REG_X0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_B0 && reg <= ARM64_REG_B31) {
+        snprintf(reg_name, sizeof(reg_name), "b%d", reg - ARM64_REG_B0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_H0 && reg <= ARM64_REG_H31) {
+        snprintf(reg_name, sizeof(reg_name), "h%d", reg - ARM64_REG_H0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_S0 && reg <= ARM64_REG_S31) {
+        snprintf(reg_name, sizeof(reg_name), "s%d", reg - ARM64_REG_S0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_D0 && reg <= ARM64_REG_D31) {
+        snprintf(reg_name, sizeof(reg_name), "d%d", reg - ARM64_REG_D0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_Q0 && reg <= ARM64_REG_Q31) {
+        snprintf(reg_name, sizeof(reg_name), "q%d", reg - ARM64_REG_Q0);
+        return reg_name;
+    }
+
+    if (reg >= ARM64_REG_V0 && reg <= ARM64_REG_V31) {
+        snprintf(reg_name, sizeof(reg_name), "v%d", reg - ARM64_REG_V0);
+        return reg_name;
+    }
+
+    switch (reg) {
+        case ARM64_REG_SP:
+            return "sp";
+        case ARM64_REG_FP:
+            return "fp";
+        case ARM64_REG_LR:
+            return "lr";
+        case ARM64_REG_NZCV:
+            return "nzcv";
+        case ARM64_REG_WZR:
+            return "wzr";
+        case ARM64_REG_XZR:
+            return "xzr";
+        default:
+            return "unk";
+    }
+}
+
 
 static const char hex_chars[] = "0123456789abcdef";
 
