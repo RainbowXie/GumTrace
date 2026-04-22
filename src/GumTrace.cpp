@@ -347,7 +347,7 @@ void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput
             continue;
         }
 
-        if (Utils::is_lse(p_insn) == false) {
+        if (gum_stalker_iterator_get_memory_access(it) != GUM_MEMORY_ACCESS_EXCLUSIVE) {
             const auto& module = self->get_module_by_name(*module_name_ptr);
 
             auto callback_ctx = self->callback_context_instance->pull(p_insn, module_name_ptr->c_str(), module.at("base"));
