@@ -13,16 +13,14 @@ struct CALLBACK_CTX {
     uint64_t module_base;
     cs_insn instruction{};
     cs_detail instruction_detail{};
-    csh handle = 0;
 };
 
 class CallbackContext {
 public:
     static CallbackContext *get_instance();
+    CALLBACK_CTX* pull(const cs_insn* _instruction, const char* module_name, uint64_t module_base);
     CALLBACK_CTX* list;
     int curr_index = 0;
-
-    CALLBACK_CTX* pull(const cs_insn* _instruction, csh _handle, const char* module_name, uint64_t module_base);
 private:
     CallbackContext();
 
