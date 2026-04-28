@@ -5,28 +5,51 @@ let gumtrace_init = null
 let gumtrace_run = null
 let gumtrace_unrun = null
 
-function loadGumTrace() {
-    let dlopen = new NativeFunction(Module.findGlobalExportByName('dlopen'), 'pointer', ['pointer', 'int'])
-    let dlsym = new NativeFunction(Module.findGlobalExportByName('dlsym'), 'pointer', ['pointer', 'pointer'])
-
-    let soHandle = dlopen(Memory.allocUtf8String('/var/jb/var/root/' + traceSoName), 2)
-    console.log('GumTrace loaded:', soHandle)
-
-    gumtrace_init = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('init')), 'void', ['pointer', 'pointer', 'int', 'pointer'])
-    gumtrace_run = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('run')), 'void', [])
-    gumtrace_unrun = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('unrun')), 'void', [])
-}
-
-
 function getSandboxPath(filename) {
     try {
         const homePath = ObjC.classes.NSString.stringWithString_("~").stringByExpandingTildeInPath().toString();
-        console.log('trace file:', homePath + '/Documents/' + filename);
         return homePath + '/Documents/' + filename;
     } catch (e) {
         console.log('获取沙盒路径失败:', e);
         return '/tmp/' + filename
     }
+}
+
+function loadGumTrace() {
+    let dlopen = new NativeFunction(Module.findGlobalExportByName('dlopen'), 'pointer', ['pointer', 'int'])
+    let dlsym = new NativeFunction(Module.findGlobalExportByName('dlsym'), 'pointer', ['pointer', 'pointer'])
+
+    // hide-jb ON 时 /var/jb 前缀对 app 进程隐形,sandbox Documents 是两种模式下都可见的稳定路径
+    // hide-jb ON 场景: 提前把 libGumTrace.dylib 推到 app sandbox 的 Documents 目录
+    let candidates = [
+        getSandboxPath(traceSoName),
+        '/var/jb/var/root/' + traceSoName,
+    ]
+
+    let soHandle = null
+    let loadedFrom = null
+    for (let path of candidates) {
+        let h = dlopen(Memory.allocUtf8String(path), 2)
+        if (!h.isNull()) {
+            soHandle = h
+            loadedFrom = path
+            break
+        }
+        console.log('  dlopen miss:', path)
+    }
+
+    if (!soHandle || soHandle.isNull()) {
+        throw new Error(
+            'GumTrace dlopen failed. Push libGumTrace.dylib to ' +
+            getSandboxPath(traceSoName) + ' (hide-jb OFF) or use Frida session.inject_library_file ' +
+            '(hide-jb ON, since iOS sandbox blocks mmap-exec from app Documents).'
+        )
+    }
+    console.log('GumTrace loaded from:', loadedFrom)
+
+    gumtrace_init = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('init')), 'void', ['pointer', 'pointer', 'int', 'pointer'])
+    gumtrace_run = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('run')), 'void', [])
+    gumtrace_unrun = new NativeFunction(dlsym(soHandle, Memory.allocUtf8String('unrun')), 'void', [])
 }
 
 function startTrace() {

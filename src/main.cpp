@@ -5,6 +5,7 @@
 
 #include "GumTrace.h"
 #include "Utils.h"
+#include <unistd.h>
 
 gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data) {
     auto *instance = GumTrace::get_instance();
@@ -86,6 +87,23 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
     return true;
 
 #endif
+}
+
+// Frida session.inject_library_file/blob 协议要求的 entry 函数。
+// 调用即视作 dylib 已被 Frida 用 mach-VM 注入到目标进程,后续可通过
+// Module.findExportByName('libGumTrace.dylib','init') 等找到并驱动 trace。
+// 不在 entry 内做实际工作,以避免 hide-jb / 沙盒下的早期初始化副作用。
+extern "C" __attribute__((visibility("default")))
+void frida_entry(const char *data) {
+    // 用 stderr write 而不是 g_print/printf 避免依赖 glib 在 entry 时的初始化状态
+    const char *msg = "[GumTrace] frida_entry invoked\n";
+    write(2, msg, 31);
+    if (data && *data) {
+        write(2, "[GumTrace] data=", 16);
+        size_t len = 0; while (data[len] && len < 256) ++len;
+        write(2, data, len);
+        write(2, "\n", 1);
+    }
 }
 
 extern "C" __attribute__((visibility("default")))
