@@ -145,8 +145,12 @@ static void on_enter(GumInvocationListener *listener, GumInvocationContext *ctx)
     HookKind kind = (HookKind)(uintptr_t)gum_invocation_context_get_listener_function_data(ctx);
     switch (kind) {
         case HK_ENTRY: {
+#if PLATFORM_IOS
             unsigned int tid = (unsigned int)mach_thread_self();
             mach_port_deallocate(mach_task_self(), tid);
+#else
+            unsigned int tid = 0;
+#endif
             g_entry_fire_count.fetch_add(1, std::memory_order_relaxed);
             // 启 trace (一次性 init+run,后续 entry fire 只 ++depth)
             if (!g_trace_active.load()) {
