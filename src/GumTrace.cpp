@@ -7,6 +7,9 @@
 
 std::atomic<unsigned long> g_callout_count(0);
 std::atomic<unsigned long> g_transform_count(0);
+std::atomic<unsigned long> g_first_addr_count(0);
+unsigned long g_first_addrs[8] = {0};
+unsigned long g_in_range_hits = 0;
 #include "Utils.h"
 #include "FuncPrinter.h"
 
@@ -344,6 +347,11 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
     // }
 }
 
+// debug: 抓前 5 个 transform 看到的地址,和 modules range 一起 dump 出来
+extern std::atomic<unsigned long> g_first_addr_count;
+extern unsigned long g_first_addrs[8];
+extern unsigned long g_in_range_hits;
+
 void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput *output, gpointer user_data) {
     g_transform_count.fetch_add(1, std::memory_order_relaxed);
     const auto self = get_instance();
@@ -351,11 +359,16 @@ void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput
     cs_insn *p_insn;
     auto *it = iterator;
     while (gum_stalker_iterator_next(it, (const cs_insn **) &p_insn)) {
+        // debug: 抓前几个 instruction 地址
+        unsigned long idx = g_first_addr_count.fetch_add(1, std::memory_order_relaxed);
+        if (idx < 8) g_first_addrs[idx] = (unsigned long)p_insn->address;
+
         const std::string *module_name_ptr = self->in_range_module(p_insn->address);
         if (module_name_ptr == nullptr) {
             gum_stalker_iterator_keep(it);
             continue;
         }
+        g_in_range_hits++;
 
         if (gum_stalker_iterator_get_memory_access(it) != GUM_MEMORY_ACCESS_EXCLUSIVE) {
             const auto& module = self->get_module_by_name(*module_name_ptr);

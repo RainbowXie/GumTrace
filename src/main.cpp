@@ -176,19 +176,36 @@ void frida_entry(const char *data) {
     usleep(duration_ms * 1000);
     unrun();
 
-    // debug: 把 callout/transform 计数写到 sandbox tmp,验证 stalker 内部到底有没在跑
+    // debug: dump stalker counters + module range + 前几个 transform 看到的地址
     if (home) {
         extern std::atomic<unsigned long> g_callout_count;
         extern std::atomic<unsigned long> g_transform_count;
+        extern std::atomic<unsigned long> g_first_addr_count;
+        extern unsigned long g_first_addrs[8];
+        extern unsigned long g_in_range_hits;
         char p[1024];
         snprintf(p, sizeof(p), "%s/tmp/gumtrace_stalker_stats", home);
         int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) {
-            char b[256];
+            char b[2048];
+            // 拿 GumTrace instance 的 modules map 看 base/size
+            auto &mods = GumTrace::get_instance()->modules;
+            char range_dbg[256] = "(no module)";
+            auto it = mods.find(module_name);
+            if (it != mods.end()) {
+                size_t base = it->second.at("base");
+                size_t size = it->second.at("size");
+                snprintf(range_dbg, sizeof(range_dbg),
+                    "base=0x%lx size=0x%lx end=0x%lx",
+                    (unsigned long)base, (unsigned long)size, (unsigned long)(base+size));
+            }
             int n = snprintf(b, sizeof(b),
-                "tid=%d module=%s\ntransform_count=%lu\ncallout_count=%lu\n",
-                thread_id, module_name,
-                g_transform_count.load(), g_callout_count.load());
+                "tid=%d module=%s\nrange: %s\ntransform_count=%lu\ncallout_count=%lu\nin_range_hits=%lu\n"
+                "first transform addrs: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+                thread_id, module_name, range_dbg,
+                g_transform_count.load(), g_callout_count.load(), g_in_range_hits,
+                g_first_addrs[0], g_first_addrs[1], g_first_addrs[2], g_first_addrs[3],
+                g_first_addrs[4], g_first_addrs[5], g_first_addrs[6], g_first_addrs[7]);
             write(fd, b, n);
             close(fd);
         }
