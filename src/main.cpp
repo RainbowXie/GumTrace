@@ -104,46 +104,114 @@ extern "C" void init(const char *module_names, char *trace_file_path, int thread
 extern "C" void run();
 extern "C" void unrun();
 
-// hook-driven trace: 只在 target 函数被命中时启 trace,onLeave 收 trace
-// 这样 trace 范围聚焦在 target 函数执行期间,匹配 example_ios.js 的标准用法。
+// === Snapchat iOS attestation anti-anti port (基于 snapchat_attestation_gumtrace.ts) ===
+//
+// 历史已经能过 anti-tamper 拿到 646MB trace 的配置 (memory: snapchat_ios_anti_anti_archive.md):
+//
+// 4 个外层 entry hook offset (任一 fire → start trace,depth=0 时 stop):
+//   0x31e12f8  sub_1031E0FFC                                     registration zone
+//   0x31e1e24  -[SCGrpcRegistrationService _registerWithUser:...] gRPC pipeline
+//   0x4875648  -[SCPreLoginAttestationImpl generateAttestationPayloadForLoginOrRegistration:...]
+//   0x6bdc20   sub_1006BDC20                                      narrow native attestation
+//
+// 必装 anti-anti patch (装在 entry hook 之前):
+//   0x7B29FC sub_1007B29FC: a27 字段 onLeave 清 bit 63 (保 varint 9 字节,过 size assertion)
+//   0x7B2C84 sub_1007B2C84: onEnter X1 == 0xa3 → 0xa2 (绕 fail-path signature)
+
+enum HookKind : uintptr_t {
+    HK_ENTRY = 1,
+    HK_A27   = 2,
+    HK_C84   = 3,
+};
 
 static GumInterceptor *g_interceptor = nullptr;
+static std::atomic<bool> g_trace_active(false);
+static std::atomic<unsigned int> g_trace_owner_tid(0);
+static std::atomic<int> g_trace_depth(0);
+static std::atomic<unsigned long> g_entry_fire_count(0);
+static std::atomic<unsigned long> g_a27_fire_count(0);
+static std::atomic<unsigned long> g_c84_patch_count(0);
 
-typedef struct _HookListener {
-    GObject parent;
-} HookListener;
-
-typedef struct _HookListenerClass {
-    GObjectClass parent_class;
-} HookListenerClass;
-
+typedef struct _HookListener { GObject parent; } HookListener;
+typedef struct _HookListenerClass { GObjectClass parent_class; } HookListenerClass;
 static void hook_listener_iface_init(gpointer g_iface, gpointer iface_data);
-
 #define HOOK_TYPE_LISTENER (hook_listener_get_type())
 G_DEFINE_TYPE_EXTENDED(HookListener, hook_listener, G_TYPE_OBJECT, 0,
     G_IMPLEMENT_INTERFACE(GUM_TYPE_INVOCATION_LISTENER, hook_listener_iface_init))
-
 static void hook_listener_init(HookListener *self) {}
 static void hook_listener_class_init(HookListenerClass *klass) {}
 
-static std::atomic<unsigned long> g_hook_fire_count(0);
-
 static void on_enter(GumInvocationListener *listener, GumInvocationContext *ctx) {
-    g_hook_fire_count.fetch_add(1, std::memory_order_relaxed);
-    // Snapchat 命中 target 函数 → 启 trace (follow_me = 当前线程)
-    run();
+    HookKind kind = (HookKind)(uintptr_t)gum_invocation_context_get_listener_function_data(ctx);
+    switch (kind) {
+        case HK_ENTRY: {
+            unsigned int tid = (unsigned int)mach_thread_self();
+            mach_port_deallocate(mach_task_self(), tid);
+            g_entry_fire_count.fetch_add(1, std::memory_order_relaxed);
+            // 启 trace (一次性 init+run,后续 entry fire 只 ++depth)
+            if (!g_trace_active.load()) {
+                bool expected = false;
+                if (g_trace_active.compare_exchange_strong(expected, true)) {
+                    g_trace_owner_tid.store(tid);
+                    g_trace_depth.store(0);
+                    run();  // follow_me 当前线程
+                }
+            }
+            if (g_trace_active.load() && g_trace_owner_tid.load() == tid) {
+                int d = g_trace_depth.fetch_add(1, std::memory_order_relaxed) + 1;
+                // 用 invocation data 标记 "本帧需要在 onLeave 减"
+                int *track = (int *)gum_invocation_context_get_listener_invocation_data(ctx, sizeof(int));
+                if (track) *track = 1;
+            }
+            break;
+        }
+        case HK_A27: {
+            // 保存 X8 (out-ptr) 给 onLeave 用
+            void **slot = (void **)gum_invocation_context_get_listener_invocation_data(ctx, sizeof(void *));
+            if (slot) *slot = (void *)ctx->cpu_context->x[8];
+            g_a27_fire_count.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        case HK_C84: {
+            // X1 == 0xa3 → 改成 0xa2,同时 [X22] 也改
+            uint64_t x1 = ctx->cpu_context->x[1];
+            if ((x1 & 0xFF) == 0xa3) {
+                ctx->cpu_context->x[1] = 0xa2;
+                uint64_t x22 = ctx->cpu_context->x[22];
+                if (x22) *(uint64_t *)x22 = 0xa2;
+                g_c84_patch_count.fetch_add(1, std::memory_order_relaxed);
+            }
+            break;
+        }
+    }
 }
+
 static void on_leave(GumInvocationListener *listener, GumInvocationContext *ctx) {
-    // 函数返回 → 停 trace
-    // 但 unrun 会 close 文件,多次进出会重新打开 truncate。
-    // 改为只 unfollow_me,文件保留累积 trace,frida_entry 退出时统一 close。
-    auto inst = GumTrace::get_instance();
-    if (inst->trace_thread_id > 0) gum_stalker_unfollow(inst->_stalker, inst->trace_thread_id);
-    else gum_stalker_unfollow_me(inst->_stalker);
-    if (inst->trace_file.is_open()) {
-        inst->trace_file.write(inst->buffer, inst->buffer_offset);
-        inst->buffer_offset = 0;
-        inst->trace_file.flush();
+    HookKind kind = (HookKind)(uintptr_t)gum_invocation_context_get_listener_function_data(ctx);
+    switch (kind) {
+        case HK_ENTRY: {
+            int *track = (int *)gum_invocation_context_get_listener_invocation_data(ctx, sizeof(int));
+            if (!track || !*track) break;
+            int d = g_trace_depth.fetch_sub(1, std::memory_order_relaxed) - 1;
+            if (d <= 0 && g_trace_active.load()) {
+                // unrun (unfollow + flush + close trace)
+                unrun();
+                g_trace_active.store(false);
+            }
+            break;
+        }
+        case HK_A27: {
+            // 读 [X8] (a27 值),清 bit 63
+            void **slot = (void **)gum_invocation_context_get_listener_invocation_data(ctx, sizeof(void *));
+            if (!slot || !*slot) break;
+            uint64_t *a27ptr = (uint64_t *)*slot;
+            uint64_t v = *a27ptr;
+            if (v >> 63) {
+                *a27ptr = v & 0x7FFFFFFFFFFFFFFFULL;
+            }
+            break;
+        }
+        case HK_C84: break;
     }
 }
 
@@ -153,86 +221,115 @@ static void hook_listener_iface_init(gpointer g_iface, gpointer iface_data) {
     iface->on_leave = on_leave;
 }
 
-// data 格式: "module_name|trace_path|target_offset_hex|wait_seconds"
-// 例:
-//   "Snapchat||7DC1F0|30"   trace 文件默认 sandbox/Documents,hook Snapchat+0x7DC1F0,等 30s
+// data 格式: "module_name|trace_path|wait_seconds"
+// 例: "Snapchat||60"  → 60s 等用户走完 注册→密码→确认
 extern "C" __attribute__((visibility("default")))
 void frida_entry(const char *data) {
     char module_name[256] = "Snapchat";
     char trace_path[1024];
-    char target_offset_hex[32] = "7DC1F0";  // sub_1007DC1F0 prebuf_v2_encrypt (anti-tamper immune)
-    int wait_seconds = 30;
+    int wait_seconds = 60;
 
     const char *home = getenv("HOME");
-    snprintf(trace_path, sizeof(trace_path), "%s/Documents/gumtrace_inject.log",
+    snprintf(trace_path, sizeof(trace_path), "%s/Documents/Snapchat_full.log",
              home ? home : "/tmp");
 
     if (data && *data) {
         char buf[2048];
         snprintf(buf, sizeof(buf), "%s", data);
-        char *parts[4] = {nullptr, nullptr, nullptr, nullptr};
+        char *parts[3] = {nullptr, nullptr, nullptr};
         int idx = 0;
         char *tok = buf;
         char *p = buf;
-        while (*p && idx < 4) {
+        while (*p && idx < 3) {
             if (*p == '|') { *p = 0; parts[idx++] = tok; tok = p + 1; }
             p++;
         }
-        if (idx < 4) parts[idx++] = tok;
+        if (idx < 3) parts[idx++] = tok;
         if (parts[0] && *parts[0]) snprintf(module_name, sizeof(module_name), "%s", parts[0]);
         if (parts[1] && *parts[1]) snprintf(trace_path, sizeof(trace_path), "%s", parts[1]);
-        if (parts[2] && *parts[2]) snprintf(target_offset_hex, sizeof(target_offset_hex), "%s", parts[2]);
-        if (parts[3] && *parts[3]) wait_seconds = atoi(parts[3]);
+        if (parts[2] && *parts[2]) wait_seconds = atoi(parts[2]);
     }
-    if (wait_seconds < 1) wait_seconds = 30;
+    if (wait_seconds < 1) wait_seconds = 60;
 
-    // init: 准备 trace state,thread_id=0 → follow_me 模式 (hook 触发线程被 follow)
+    // init 准备 trace state (但不 run 不 unfollow,等 entry hook fire 才启)
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
-    init(module_name, trace_path, 0, &opts);
+    opts.mode = 1;  // DEBUG 模式高频 flush,trace 中途崩也保有数据
+    init(module_name, trace_path, 0, &opts);  // thread_id=0 → run() 内 follow_me 当前线程 (entry fire 时 = Snap 线程)
 
-    // 计算 target 地址 = module base + offset
     auto inst = GumTrace::get_instance();
     auto it = inst->modules.find(module_name);
     if (it == inst->modules.end()) {
-        // module 没 init 上 (找不到),啥都做不了
-        unrun();
         return;
     }
     size_t base = it->second.at("base");
-    size_t offset = strtoul(target_offset_hex, nullptr, 16);
-    void *target = (void *)(base + offset);
-
-    // gum_interceptor_attach
     g_interceptor = gum_interceptor_obtain();
-    HookListener *listener = (HookListener *)g_object_new(HOOK_TYPE_LISTENER, NULL);
+
+    // 1. 装 anti-anti patch (BEFORE entry hooks,确保任何路径都先经 patch)
+    HookListener *a27_listener = (HookListener *)g_object_new(HOOK_TYPE_LISTENER, NULL);
+    HookListener *c84_listener = (HookListener *)g_object_new(HOOK_TYPE_LISTENER, NULL);
     gum_interceptor_begin_transaction(g_interceptor);
-    GumAttachReturn ar = gum_interceptor_attach(g_interceptor, target,
-                           GUM_INVOCATION_LISTENER(listener), nullptr,
-                           GUM_ATTACH_FLAGS_NONE);
+    GumAttachReturn ar_a27 = gum_interceptor_attach(g_interceptor,
+        (void *)(base + 0x7B29FC), GUM_INVOCATION_LISTENER(a27_listener),
+        (gpointer)(uintptr_t)HK_A27, GUM_ATTACH_FLAGS_NONE);
+    GumAttachReturn ar_c84 = gum_interceptor_attach(g_interceptor,
+        (void *)(base + 0x7B2C84), GUM_INVOCATION_LISTENER(c84_listener),
+        (gpointer)(uintptr_t)HK_C84, GUM_ATTACH_FLAGS_NONE);
+
+    // 2. 装 4 个外层 entry hook
+    static const size_t ENTRY_OFFS[] = {0x31e12f8, 0x31e1e24, 0x4875648, 0x6bdc20};
+    HookListener *entry_listeners[4] = {nullptr};
+    GumAttachReturn ar_entries[4] = {(GumAttachReturn)-1,(GumAttachReturn)-1,
+                                     (GumAttachReturn)-1,(GumAttachReturn)-1};
+    for (int i = 0; i < 4; i++) {
+        entry_listeners[i] = (HookListener *)g_object_new(HOOK_TYPE_LISTENER, NULL);
+        ar_entries[i] = gum_interceptor_attach(g_interceptor,
+            (void *)(base + ENTRY_OFFS[i]), GUM_INVOCATION_LISTENER(entry_listeners[i]),
+            (gpointer)(uintptr_t)HK_ENTRY, GUM_ATTACH_FLAGS_NONE);
+    }
     gum_interceptor_end_transaction(g_interceptor);
 
-    // 写 hook attach 状态到 marker (hide-jb ON 下没 stderr 可看)
+    // marker: 确认所有 hook attach 成功
     if (home) {
         char p[1024]; snprintf(p, sizeof(p), "%s/tmp/gumtrace_hook_status", home);
         int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) {
-            char b[256];
+            char b[1024];
             int n = snprintf(b, sizeof(b),
-                "module=%s base=0x%lx offset=0x%lx target=%p attach_result=%d wait=%ds\n",
-                module_name, (unsigned long)base, (unsigned long)offset, target, ar, wait_seconds);
+                "module=%s base=0x%lx wait=%ds\n"
+                "patch a27 (0x7B29FC) attach=%d\n"
+                "patch c84 (0x7B2C84) attach=%d\n"
+                "entry 0x31e12f8 attach=%d\n"
+                "entry 0x31e1e24 attach=%d\n"
+                "entry 0x4875648 attach=%d\n"
+                "entry 0x6bdc20  attach=%d\n",
+                module_name, (unsigned long)base, wait_seconds,
+                ar_a27, ar_c84,
+                ar_entries[0], ar_entries[1], ar_entries[2], ar_entries[3]);
             write(fd, b, n); close(fd);
         }
     }
 
-    // 等待 hook 触发 (用户在屏幕上走流程触发 attestation)
     sleep(wait_seconds);
 
-    // detach + cleanup
-    gum_interceptor_detach(g_interceptor, GUM_INVOCATION_LISTENER(listener));
-    g_object_unref(listener);
+    // detach 全部
+    gum_interceptor_detach(g_interceptor, GUM_INVOCATION_LISTENER(a27_listener));
+    gum_interceptor_detach(g_interceptor, GUM_INVOCATION_LISTENER(c84_listener));
+    for (int i = 0; i < 4; i++) {
+        if (entry_listeners[i])
+            gum_interceptor_detach(g_interceptor, GUM_INVOCATION_LISTENER(entry_listeners[i]));
+    }
+    g_object_unref(a27_listener);
+    g_object_unref(c84_listener);
+    for (int i = 0; i < 4; i++) if (entry_listeners[i]) g_object_unref(entry_listeners[i]);
     g_object_unref(g_interceptor);
 
-    // close trace file (write final buffer + flush)
+    // 如果还在 trace,强制收
+    if (g_trace_active.load()) {
+        unrun();
+        g_trace_active.store(false);
+    }
+
+    // close trace file 兜底
     if (inst->trace_file.is_open()) {
         inst->trace_file.write(inst->buffer, inst->buffer_offset);
         inst->buffer_offset = 0;
@@ -240,13 +337,15 @@ void frida_entry(const char *data) {
         inst->trace_file.close();
     }
 
-    // dump hook fire count (确认 attestation 是否走过 target)
+    // dump 计数器
     if (home) {
         char p[1024]; snprintf(p, sizeof(p), "%s/tmp/gumtrace_hook_status", home);
         int fd = open(p, O_WRONLY | O_APPEND, 0644);
         if (fd >= 0) {
-            char b[64];
-            int n = snprintf(b, sizeof(b), "hook_fire_count=%lu\n", g_hook_fire_count.load());
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "entry_fire=%lu a27_fire=%lu c84_patch=%lu\n",
+                g_entry_fire_count.load(), g_a27_fire_count.load(), g_c84_patch_count.load());
             write(fd, b, n); close(fd);
         }
     }
