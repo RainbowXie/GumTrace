@@ -215,7 +215,8 @@ void frida_entry(const char *data) {
     };
 
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
-    stage("STAGE: about to init");
+    opts.mode = 1;  // DEBUG mode: 高频刷写日志,避免 buffer 不刷盘看不到 trace
+    stage("STAGE: about to init (DEBUG mode)");
     // tid=-1 sentinel: follow current thread + 在 entry 内跑 NEON 测试代码
     bool selftest = (thread_id == -1);
     int actual_tid = selftest ? 0 : thread_id;
