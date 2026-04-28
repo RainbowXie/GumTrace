@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
+#include <fcntl.h>
+#include <stdio.h>
 #if PLATFORM_IOS
 #include <mach/mach.h>
 #include <mach/task.h>
@@ -172,6 +175,24 @@ void frida_entry(const char *data) {
     run();
     usleep(duration_ms * 1000);
     unrun();
+
+    // debug: 把 callout/transform 计数写到 sandbox tmp,验证 stalker 内部到底有没在跑
+    if (home) {
+        extern std::atomic<unsigned long> g_callout_count;
+        extern std::atomic<unsigned long> g_transform_count;
+        char p[1024];
+        snprintf(p, sizeof(p), "%s/tmp/gumtrace_stalker_stats", home);
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "tid=%d module=%s\ntransform_count=%lu\ncallout_count=%lu\n",
+                thread_id, module_name,
+                g_transform_count.load(), g_callout_count.load());
+            write(fd, b, n);
+            close(fd);
+        }
+    }
 }
 
 extern "C" __attribute__((visibility("default")))

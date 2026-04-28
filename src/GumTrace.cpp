@@ -3,6 +3,10 @@
 //
 
 #include "GumTrace.h"
+#include <atomic>
+
+std::atomic<unsigned long> g_callout_count(0);
+std::atomic<unsigned long> g_transform_count(0);
 #include "Utils.h"
 #include "FuncPrinter.h"
 
@@ -51,7 +55,12 @@ JNIEnv *GumTrace::get_run_time_env() {
 
 
 
+// debug counter — 验证 callout 是否真在 fire (frida_entry 退出时打印)
+extern std::atomic<unsigned long> g_callout_count;
+extern std::atomic<unsigned long> g_transform_count;
+
 void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) {
+    g_callout_count.fetch_add(1, std::memory_order_relaxed);
     auto self = get_instance();
     auto callback_ctx = (CALLBACK_CTX *)user_data;
     char *buff = self->buffer;
@@ -336,6 +345,7 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
 }
 
 void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput *output, gpointer user_data) {
+    g_transform_count.fetch_add(1, std::memory_order_relaxed);
     const auto self = get_instance();
 
     cs_insn *p_insn;
