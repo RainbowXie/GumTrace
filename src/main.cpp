@@ -8,9 +8,6 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <atomic>
-#include <fcntl.h>
-#include <stdio.h>
 #if PLATFORM_IOS
 #include <mach/mach.h>
 #include <mach/task.h>
@@ -153,24 +150,20 @@ void frida_entry(const char *data) {
 
 #if PLATFORM_IOS
     // thread_id == 0 → 自动找主线程。
-    // 关键: frida_entry 在 Frida 注入的新 thread 上跑,这个新 thread 的 mach port
-    // 可能小于 Snapchat 真正的 main thread (mach port 复用机制),所以**不能简单取最小 port**。
-    // 改为: 取最小 port,但排除当前线程 (frida_entry 自己)。
+    // 关键: frida_entry 跑在 Frida 注入的临时线程上,而 mach port 在 Darwin 上是
+    // 复用 + 单调递增的,新 thread 的 port 可能比 Snapchat main 还小。所以不能直接取
+    // task_threads 的最小 port,要**先排除当前线程 (frida_entry 自己)** 再取最小。
+    // 不排除 self 会导致 Stalker 跟踪 frida_entry 自己的 usleep 循环 (在 libsystem
+    // 内部),完全看不到目标 app 的代码。
     if (thread_id == 0) {
         mach_port_t self_tid = mach_thread_self();
         thread_act_array_t threads = nullptr;
         mach_msg_type_number_t count = 0;
-        // 同时把所有 thread id dump 到 marker 用于调试
-        char tid_dump[2048] = {0}; int td_n = 0;
         if (task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS) {
             unsigned int min_tid = 0;
-            td_n = snprintf(tid_dump, sizeof(tid_dump),
-                "self_tid=%u threads(%u):", (unsigned int)self_tid, count);
             for (mach_msg_type_number_t i = 0; i < count; i++) {
                 unsigned int t = (unsigned int)threads[i];
-                if (td_n < (int)sizeof(tid_dump) - 16)
-                    td_n += snprintf(tid_dump + td_n, sizeof(tid_dump) - td_n, " %u", t);
-                if (t == (unsigned int)self_tid) continue;  // 排除自己
+                if (t == (unsigned int)self_tid) continue;
                 if (min_tid == 0 || t < min_tid) min_tid = t;
             }
             vm_deallocate(mach_task_self(), (vm_address_t)threads,
@@ -178,13 +171,6 @@ void frida_entry(const char *data) {
             thread_id = (int)min_tid;
         }
         mach_port_deallocate(mach_task_self(), self_tid);
-        // 写到 marker
-        if (home && tid_dump[0]) {
-            char p[1024];
-            snprintf(p, sizeof(p), "%s/tmp/gumtrace_tid_dump", home);
-            int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd >= 0) { write(fd, tid_dump, td_n); write(fd, "\n", 1); close(fd); }
-        }
     }
 #endif
 
@@ -193,41 +179,6 @@ void frida_entry(const char *data) {
     run();
     usleep(duration_ms * 1000);
     unrun();
-
-    // debug: dump stalker counters + module range + 前几个 transform 看到的地址
-    if (home) {
-        extern std::atomic<unsigned long> g_callout_count;
-        extern std::atomic<unsigned long> g_transform_count;
-        extern std::atomic<unsigned long> g_first_addr_count;
-        extern unsigned long g_first_addrs[8];
-        extern unsigned long g_in_range_hits;
-        char p[1024];
-        snprintf(p, sizeof(p), "%s/tmp/gumtrace_stalker_stats", home);
-        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) {
-            char b[2048];
-            // 拿 GumTrace instance 的 modules map 看 base/size
-            auto &mods = GumTrace::get_instance()->modules;
-            char range_dbg[256] = "(no module)";
-            auto it = mods.find(module_name);
-            if (it != mods.end()) {
-                size_t base = it->second.at("base");
-                size_t size = it->second.at("size");
-                snprintf(range_dbg, sizeof(range_dbg),
-                    "base=0x%lx size=0x%lx end=0x%lx",
-                    (unsigned long)base, (unsigned long)size, (unsigned long)(base+size));
-            }
-            int n = snprintf(b, sizeof(b),
-                "tid=%d module=%s\nrange: %s\ntransform_count=%lu\ncallout_count=%lu\nin_range_hits=%lu\n"
-                "first transform addrs: 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
-                thread_id, module_name, range_dbg,
-                g_transform_count.load(), g_callout_count.load(), g_in_range_hits,
-                g_first_addrs[0], g_first_addrs[1], g_first_addrs[2], g_first_addrs[3],
-                g_first_addrs[4], g_first_addrs[5], g_first_addrs[6], g_first_addrs[7]);
-            write(fd, b, n);
-            close(fd);
-        }
-    }
 }
 
 extern "C" __attribute__((visibility("default")))

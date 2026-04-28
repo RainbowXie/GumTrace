@@ -3,14 +3,6 @@
 //
 
 #include "GumTrace.h"
-#include <atomic>
-
-std::atomic<unsigned long> g_callout_count(0);
-std::atomic<unsigned long> g_transform_count(0);
-std::atomic<unsigned long> g_first_addr_count(0);
-unsigned long g_first_addrs[8] = {0};
-unsigned long g_in_range_hits = 0;
-bool g_debug_trace_all = true;  // 临时: 所有 instruction 都 put_callout
 #include "Utils.h"
 #include "FuncPrinter.h"
 
@@ -59,12 +51,7 @@ JNIEnv *GumTrace::get_run_time_env() {
 
 
 
-// debug counter — 验证 callout 是否真在 fire (frida_entry 退出时打印)
-extern std::atomic<unsigned long> g_callout_count;
-extern std::atomic<unsigned long> g_transform_count;
-
 void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) {
-    g_callout_count.fetch_add(1, std::memory_order_relaxed);
     auto self = get_instance();
     auto callback_ctx = (CALLBACK_CTX *)user_data;
     char *buff = self->buffer;
@@ -348,36 +335,17 @@ void GumTrace::callout_callback(GumCpuContext *cpu_context, gpointer user_data) 
     // }
 }
 
-// debug: 抓前 5 个 transform 看到的地址,和 modules range 一起 dump 出来
-extern std::atomic<unsigned long> g_first_addr_count;
-extern unsigned long g_first_addrs[8];
-extern unsigned long g_in_range_hits;
-
 void GumTrace::transform_callback(GumStalkerIterator *iterator, GumStalkerOutput *output, gpointer user_data) {
-    g_transform_count.fetch_add(1, std::memory_order_relaxed);
     const auto self = get_instance();
 
     cs_insn *p_insn;
     auto *it = iterator;
     while (gum_stalker_iterator_next(it, (const cs_insn **) &p_insn)) {
-        // debug: 抓前几个 instruction 地址
-        unsigned long idx = g_first_addr_count.fetch_add(1, std::memory_order_relaxed);
-        if (idx < 8) g_first_addrs[idx] = (unsigned long)p_insn->address;
-
         const std::string *module_name_ptr = self->in_range_module(p_insn->address);
         if (module_name_ptr == nullptr) {
-            // debug: 临时不过滤,所有 instruction 都 put_callout 看 callout 是否真能 fire
-            // (确认 Stalker 机制可用,只是 Snapchat module 3s 内没执行)
-            extern bool g_debug_trace_all;
-            if (g_debug_trace_all && gum_stalker_iterator_get_memory_access(it) != GUM_MEMORY_ACCESS_EXCLUSIVE) {
-                gum_stalker_iterator_put_callout(it,
-                    [](GumCpuContext*, gpointer){ g_callout_count.fetch_add(1, std::memory_order_relaxed); },
-                    nullptr, nullptr);
-            }
             gum_stalker_iterator_keep(it);
             continue;
         }
-        g_in_range_hits++;
 
         if (gum_stalker_iterator_get_memory_access(it) != GUM_MEMORY_ACCESS_EXCLUSIVE) {
             const auto& module = self->get_module_by_name(*module_name_ptr);
