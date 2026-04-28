@@ -217,13 +217,27 @@ void frida_entry(const char *data) {
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
     stage("STAGE: about to init");
     // tid=-1 sentinel: follow current thread + 在 entry 内跑 NEON 测试代码
-    // 用于验证 inject 路径 + Q reg 落 trace 的端到端机制 (不依赖 Snapchat 主线程是否执行 module 代码)
     bool selftest = (thread_id == -1);
     int actual_tid = selftest ? 0 : thread_id;
-    // selftest 时 trace 自己 dylib 的代码 (即 frida_entry 后面跑的 NEON 测试)
     const char *trace_module = selftest ? "libGumTrace.dylib" : module_name;
+    // pre-init: 验证 module 是否能被 gum 找到
+    {
+        gum_init();  // safe to call multiple times
+        auto *gm = gum_process_find_module_by_name(trace_module);
+        char dbg[256];
+        snprintf(dbg, sizeof(dbg), "STAGE: pre-init gum_find_module(%s) = %p",
+            trace_module, (void*)gm);
+        stage(dbg);
+    }
     init((char*)trace_module, trace_path, actual_tid, &opts);
-    stage("STAGE: init returned");
+    {
+        struct stat st;
+        if (stat(trace_path, &st) == 0) {
+            char dbg[256];
+            snprintf(dbg, sizeof(dbg), "STAGE: init returned, trace size=%lld", (long long)st.st_size);
+            stage(dbg);
+        } else stage("STAGE: init returned, trace stat fail");
+    }
     run();
     stage("STAGE: run returned");
     if (selftest) {
@@ -243,9 +257,24 @@ void frida_entry(const char *data) {
     } else {
         usleep(duration_ms * 1000);
     }
+    {
+        struct stat st;
+        if (stat(trace_path, &st) == 0) {
+            char dbg[256];
+            snprintf(dbg, sizeof(dbg), "STAGE: pre-unrun trace size=%lld", (long long)st.st_size);
+            stage(dbg);
+        }
+    }
     stage("STAGE: calling unrun");
     unrun();
-    stage("STAGE: unrun returned");
+    {
+        struct stat st;
+        if (stat(trace_path, &st) == 0) {
+            char dbg[256];
+            snprintf(dbg, sizeof(dbg), "STAGE: unrun returned, trace size=%lld", (long long)st.st_size);
+            stage(dbg);
+        }
+    }
 }
 
 extern "C" __attribute__((visibility("default")))
