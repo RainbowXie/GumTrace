@@ -216,12 +216,34 @@ void frida_entry(const char *data) {
 
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
     stage("STAGE: about to init");
-    init(module_name, trace_path, thread_id, &opts);
+    // tid=-1 sentinel: follow current thread + 在 entry 内跑 NEON 测试代码
+    // 用于验证 inject 路径 + Q reg 落 trace 的端到端机制 (不依赖 Snapchat 主线程是否执行 module 代码)
+    bool selftest = (thread_id == -1);
+    int actual_tid = selftest ? 0 : thread_id;
+    // selftest 时 trace 自己 dylib 的代码 (即 frida_entry 后面跑的 NEON 测试)
+    const char *trace_module = selftest ? "libGumTrace.dylib" : module_name;
+    init((char*)trace_module, trace_path, actual_tid, &opts);
     stage("STAGE: init returned");
     run();
-    stage("STAGE: run returned, sleeping");
-    usleep(duration_ms * 1000);
-    stage("STAGE: sleep done, calling unrun");
+    stage("STAGE: run returned");
+    if (selftest) {
+        stage("STAGE: selftest NEON loop start");
+        // 强制 NEON 指令运行,Q reg 应该出现在 trace 里
+        for (int i = 0; i < 200; i++) {
+            __asm__ volatile (
+                "fmov v0.2d, #1.0\n"
+                "fmov v1.2d, #2.0\n"
+                "fadd v2.2d, v0.2d, v1.2d\n"
+                "fmul v3.2d, v2.2d, v0.2d\n"
+                "fsub v4.2d, v3.2d, v1.2d\n"
+                : : : "v0","v1","v2","v3","v4"
+            );
+        }
+        stage("STAGE: selftest NEON loop done");
+    } else {
+        usleep(duration_ms * 1000);
+    }
+    stage("STAGE: calling unrun");
     unrun();
     stage("STAGE: unrun returned");
 }
