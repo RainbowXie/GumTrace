@@ -152,20 +152,38 @@ void frida_entry(const char *data) {
     if (duration_ms < 100) duration_ms = 1500;
 
 #if PLATFORM_IOS
-    // thread_id == 0 → 自动找主线程。当前 frida_entry 跑在 Frida 注入的临时线程上,
-    // gum_stalker_follow_me 跟它对实际逻辑分析没意义,所以默认转发到主线程。
+    // thread_id == 0 → 自动找主线程。
+    // 关键: frida_entry 在 Frida 注入的新 thread 上跑,这个新 thread 的 mach port
+    // 可能小于 Snapchat 真正的 main thread (mach port 复用机制),所以**不能简单取最小 port**。
+    // 改为: 取最小 port,但排除当前线程 (frida_entry 自己)。
     if (thread_id == 0) {
+        mach_port_t self_tid = mach_thread_self();
         thread_act_array_t threads = nullptr;
         mach_msg_type_number_t count = 0;
+        // 同时把所有 thread id dump 到 marker 用于调试
+        char tid_dump[2048] = {0}; int td_n = 0;
         if (task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS) {
             unsigned int min_tid = 0;
+            td_n = snprintf(tid_dump, sizeof(tid_dump),
+                "self_tid=%u threads(%u):", (unsigned int)self_tid, count);
             for (mach_msg_type_number_t i = 0; i < count; i++) {
                 unsigned int t = (unsigned int)threads[i];
+                if (td_n < (int)sizeof(tid_dump) - 16)
+                    td_n += snprintf(tid_dump + td_n, sizeof(tid_dump) - td_n, " %u", t);
+                if (t == (unsigned int)self_tid) continue;  // 排除自己
                 if (min_tid == 0 || t < min_tid) min_tid = t;
             }
             vm_deallocate(mach_task_self(), (vm_address_t)threads,
                           count * sizeof(thread_act_t));
             thread_id = (int)min_tid;
+        }
+        mach_port_deallocate(mach_task_self(), self_tid);
+        // 写到 marker
+        if (home && tid_dump[0]) {
+            char p[1024];
+            snprintf(p, sizeof(p), "%s/tmp/gumtrace_tid_dump", home);
+            int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { write(fd, tid_dump, td_n); write(fd, "\n", 1); close(fd); }
         }
     }
 #endif
