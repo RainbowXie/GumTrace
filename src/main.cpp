@@ -6,12 +6,8 @@
 #include "GumTrace.h"
 #include "Utils.h"
 #include <unistd.h>
-#include <dlfcn.h>
-#include <string.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <stdlib.h>
-#include <stdio.h>
+#include <string.h>
 #if PLATFORM_IOS
 #include <mach/mach.h>
 #include <mach/task.h>
@@ -100,74 +96,39 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
 #endif
 }
 
-// Frida Device.inject_library_file/blob 协议要求的 entry 函数。
-// Frida 在 entry 返回后会 dlclose 这个 dylib (fire-and-forget 模型),
-// 导致后续无法用 Module.findExportByName 找到 init/run/unrun。
-// 解法: 在 entry 里用 dladdr 拿到自身路径,再 dlopen 一次让 refcount++,
-// Frida 的 dlclose 抵消不掉,dylib 保持加载,后续 JS 可以正常用。
 // frida_entry 调用 init/run/unrun (它们在文件下方定义),需要前向声明
 extern "C" void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OPTIONS* options);
 extern "C" void run();
 extern "C" void unrun();
 
-// 写一个 marker 文件到 app sandbox tmp 目录,用来证明 frida_entry 确实被 Frida 调用过
-// (stderr 输出在 Snapchat 进程里看不见,marker 文件可以从 JS File API 反向验证)
-static void write_entry_marker(const char *data) {
-    const char *home = getenv("HOME");
-    if (!home) return;
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/tmp/gumtrace_entry_called", home);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return;
-    char buf[512];
-    int n = snprintf(buf, sizeof(buf),
-        "frida_entry invoked\n"
-        "data=%s\n"
-        "pid=%d\n",
-        data ? data : "<null>", getpid());
-    write(fd, buf, n);
-    close(fd);
-}
-
-// 从主线程 task_threads enumerate 拿出 mach thread id (通常是第一个/最低端口号)
-static unsigned int find_main_thread_id() {
-    thread_act_array_t threads = nullptr;
-    mach_msg_type_number_t count = 0;
-    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return 0;
-    // 找最小的 thread port,通常是主线程
-    unsigned int main_tid = 0;
-    for (mach_msg_type_number_t i = 0; i < count; i++) {
-        unsigned int t = (unsigned int)threads[i];
-        if (main_tid == 0 || t < main_tid) main_tid = t;
-    }
-    vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_act_t));
-    return main_tid;
-}
-
-// frida_entry: Frida 是 fire-and-forget,entry 返回后 dylib 立即被 dlclose。
-// 所以必须把 init+run+sleep+unrun 全在 entry 里做完,trace 文件落地后才返回。
+// 在 hide-jb / 受 sandbox 限制的 iOS app 里,标准 dlopen 加载本 dylib 失败:
+// app sandbox 拒绝从 Documents/Library/tmp 等可写路径 mmap-exec,且 /var/jb 路径
+// 被 hide-jb 隐藏。绕过办法是用 Frida Device.inject_library_blob/file —— 它通过
+// task_for_pid + mach VM 把 dylib 直接 map 进目标进程,完全不走 dyld 的文件路径检查。
+//
+// inject API 要求一个 entry 函数,签名 void(const char *data)。Frida 是 fire-and-forget:
+// entry 返回后 dylib 立即被 dlclose,而且 mach-VM 注入的 dylib 不在 dyld 的 image
+// 列表里(Module.findExportByName 找不到),所以无法从外部 JS 控制后续 init/run/unrun。
+// 唯一可行模式: entry 里同步把 init/run/sleep/unrun 一气呵成做完,trace 文件落地后再返回。
 //
 // data 参数格式 (pipe 分隔,空字段用默认值):
 //   "module_name|trace_path|duration_ms|thread_id"
 // 例:
-//   "libcorecrypto.dylib||1500|"      → trace libcorecrypto, 默认路径, 1.5s, 主线程
-//   "libcorecrypto.dylib|/tmp/x.log|2000|0"  → 明确指定全部
+//   "Snapchat||3000|"               → trace Snapchat 主二进制, 默认路径, 3s, 主线程
+//   "libcorecrypto.dylib|/tmp/t|2000|259"  → 全部明确
+//
+// thread_id == 0 时自动取 task_threads 里最低 mach 端口号(通常是主线程)。
 extern "C" __attribute__((visibility("default")))
 void frida_entry(const char *data) {
-    write_entry_marker(data);
-    write(2, "[GumTrace] frida_entry invoked\n", 31);
-
-    // 默认值
     char module_name[256] = "libcorecrypto.dylib";
     char trace_path[1024];
     int duration_ms = 1500;
     int thread_id = 0;
 
     const char *home = getenv("HOME");
-    snprintf(trace_path, sizeof(trace_path), "%s/Documents/smoke_trace.log",
+    snprintf(trace_path, sizeof(trace_path), "%s/Documents/gumtrace_inject.log",
              home ? home : "/tmp");
 
-    // 解析 data
     if (data && *data) {
         char buf[2048];
         snprintf(buf, sizeof(buf), "%s", data);
@@ -187,95 +148,28 @@ void frida_entry(const char *data) {
     }
     if (duration_ms < 100) duration_ms = 1500;
 
-    // thread_id == 0 时自动找主线程 (current thread = Frida 注入线程对 trace 没意义)
+    // thread_id == 0 → 自动找主线程。当前 frida_entry 跑在 Frida 注入的临时线程上,
+    // gum_stalker_follow_me 跟它对实际逻辑分析没意义,所以默认转发到主线程。
     if (thread_id == 0) {
-        thread_id = (int)find_main_thread_id();
-    }
-
-    // 写 entry 详细 config 到 marker
-    if (home) {
-        char marker[1024];
-        snprintf(marker, sizeof(marker), "%s/tmp/gumtrace_entry_called", home);
-        int fd = open(marker, O_WRONLY | O_APPEND, 0644);
-        if (fd >= 0) {
-            char b[1024];
-            int n = snprintf(b, sizeof(b),
-                "config: module=%s trace=%s duration_ms=%d tid=%d\n",
-                module_name, trace_path, duration_ms, thread_id);
-            write(fd, b, n);
-            close(fd);
+        thread_act_array_t threads = nullptr;
+        mach_msg_type_number_t count = 0;
+        if (task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS) {
+            unsigned int min_tid = 0;
+            for (mach_msg_type_number_t i = 0; i < count; i++) {
+                unsigned int t = (unsigned int)threads[i];
+                if (min_tid == 0 || t < min_tid) min_tid = t;
+            }
+            vm_deallocate(mach_task_self(), (vm_address_t)threads,
+                          count * sizeof(thread_act_t));
+            thread_id = (int)min_tid;
         }
     }
-
-    auto stage = [&](const char *msg) {
-        if (!home) return;
-        char p[1024]; snprintf(p, sizeof(p), "%s/tmp/gumtrace_entry_called", home);
-        int fd = open(p, O_WRONLY | O_APPEND, 0644);
-        if (fd >= 0) { write(fd, msg, strlen(msg)); write(fd, "\n", 1); close(fd); }
-    };
 
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
-    opts.mode = 1;  // DEBUG mode: 高频刷写日志,避免 buffer 不刷盘看不到 trace
-    stage("STAGE: about to init (DEBUG mode)");
-    // tid=-1 sentinel: follow current thread + 在 entry 内跑 NEON 测试代码
-    bool selftest = (thread_id == -1);
-    int actual_tid = selftest ? 0 : thread_id;
-    const char *trace_module = selftest ? "libGumTrace.dylib" : module_name;
-    // pre-init: 验证 module 是否能被 gum 找到
-    {
-        gum_init();  // safe to call multiple times
-        auto *gm = gum_process_find_module_by_name(trace_module);
-        char dbg[256];
-        snprintf(dbg, sizeof(dbg), "STAGE: pre-init gum_find_module(%s) = %p",
-            trace_module, (void*)gm);
-        stage(dbg);
-    }
-    init((char*)trace_module, trace_path, actual_tid, &opts);
-    {
-        struct stat st;
-        if (stat(trace_path, &st) == 0) {
-            char dbg[256];
-            snprintf(dbg, sizeof(dbg), "STAGE: init returned, trace size=%lld", (long long)st.st_size);
-            stage(dbg);
-        } else stage("STAGE: init returned, trace stat fail");
-    }
+    init(module_name, trace_path, thread_id, &opts);
     run();
-    stage("STAGE: run returned");
-    if (selftest) {
-        stage("STAGE: selftest NEON loop start");
-        // 强制 NEON 指令运行,Q reg 应该出现在 trace 里
-        for (int i = 0; i < 200; i++) {
-            __asm__ volatile (
-                "fmov v0.2d, #1.0\n"
-                "fmov v1.2d, #2.0\n"
-                "fadd v2.2d, v0.2d, v1.2d\n"
-                "fmul v3.2d, v2.2d, v0.2d\n"
-                "fsub v4.2d, v3.2d, v1.2d\n"
-                : : : "v0","v1","v2","v3","v4"
-            );
-        }
-        stage("STAGE: selftest NEON loop done");
-    } else {
-        usleep(duration_ms * 1000);
-    }
-    {
-        struct stat st;
-        if (stat(trace_path, &st) == 0) {
-            char dbg[256];
-            snprintf(dbg, sizeof(dbg), "STAGE: pre-unrun trace size=%lld", (long long)st.st_size);
-            stage(dbg);
-        }
-    }
-    stage("STAGE: calling unrun");
+    usleep(duration_ms * 1000);
     unrun();
-    {
-        struct stat st;
-        if (stat(trace_path, &st) == 0) {
-            char dbg[256];
-            snprintf(dbg, sizeof(dbg), "STAGE: unrun returned, trace size=%lld", (long long)st.st_size);
-            stage(dbg);
-        }
-    }
 }
 
 extern "C" __attribute__((visibility("default")))
