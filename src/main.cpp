@@ -12,9 +12,11 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <stdio.h>
+#if PLATFORM_IOS
 #include <mach/mach.h>
 #include <mach/task.h>
 #include <mach/thread_act.h>
+#endif
 
 gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data) {
     auto *instance = GumTrace::get_instance();
@@ -103,6 +105,11 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
 // 导致后续无法用 Module.findExportByName 找到 init/run/unrun。
 // 解法: 在 entry 里用 dladdr 拿到自身路径,再 dlopen 一次让 refcount++,
 // Frida 的 dlclose 抵消不掉,dylib 保持加载,后续 JS 可以正常用。
+// frida_entry 调用 init/run/unrun (它们在文件下方定义),需要前向声明
+extern "C" void init(const char *module_names, char *trace_file_path, int thread_id, GUM_OPTIONS* options);
+extern "C" void run();
+extern "C" void unrun();
+
 // 写一个 marker 文件到 app sandbox tmp 目录,用来证明 frida_entry 确实被 Frida 调用过
 // (stderr 输出在 Snapchat 进程里看不见,marker 文件可以从 JS File API 反向验证)
 static void write_entry_marker(const char *data) {
