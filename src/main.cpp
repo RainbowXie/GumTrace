@@ -207,11 +207,23 @@ void frida_entry(const char *data) {
         }
     }
 
+    auto stage = [&](const char *msg) {
+        if (!home) return;
+        char p[1024]; snprintf(p, sizeof(p), "%s/tmp/gumtrace_entry_called", home);
+        int fd = open(p, O_WRONLY | O_APPEND, 0644);
+        if (fd >= 0) { write(fd, msg, strlen(msg)); write(fd, "\n", 1); close(fd); }
+    };
+
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
+    stage("STAGE: about to init");
     init(module_name, trace_path, thread_id, &opts);
+    stage("STAGE: init returned");
     run();
+    stage("STAGE: run returned, sleeping");
     usleep(duration_ms * 1000);
+    stage("STAGE: sleep done, calling unrun");
     unrun();
+    stage("STAGE: unrun returned");
 }
 
 extern "C" __attribute__((visibility("default")))
