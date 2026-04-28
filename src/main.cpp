@@ -6,6 +6,8 @@
 #include "GumTrace.h"
 #include "Utils.h"
 #include <unistd.h>
+#include <dlfcn.h>
+#include <string.h>
 
 gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data) {
     auto *instance = GumTrace::get_instance();
@@ -89,13 +91,13 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
 #endif
 }
 
-// Frida session.inject_library_file/blob 协议要求的 entry 函数。
-// 调用即视作 dylib 已被 Frida 用 mach-VM 注入到目标进程,后续可通过
-// Module.findExportByName('libGumTrace.dylib','init') 等找到并驱动 trace。
-// 不在 entry 内做实际工作,以避免 hide-jb / 沙盒下的早期初始化副作用。
+// Frida Device.inject_library_file/blob 协议要求的 entry 函数。
+// Frida 在 entry 返回后会 dlclose 这个 dylib (fire-and-forget 模型),
+// 导致后续无法用 Module.findExportByName 找到 init/run/unrun。
+// 解法: 在 entry 里用 dladdr 拿到自身路径,再 dlopen 一次让 refcount++,
+// Frida 的 dlclose 抵消不掉,dylib 保持加载,后续 JS 可以正常用。
 extern "C" __attribute__((visibility("default")))
 void frida_entry(const char *data) {
-    // 用 stderr write 而不是 g_print/printf 避免依赖 glib 在 entry 时的初始化状态
     const char *msg = "[GumTrace] frida_entry invoked\n";
     write(2, msg, 31);
     if (data && *data) {
@@ -103,6 +105,15 @@ void frida_entry(const char *data) {
         size_t len = 0; while (data[len] && len < 256) ++len;
         write(2, data, len);
         write(2, "\n", 1);
+    }
+    // 自 dlopen,防止 Frida fire-and-forget 路径 dlclose 后整个 dylib 被卸载
+    Dl_info info;
+    if (dladdr((const void *)&frida_entry, &info) && info.dli_fname) {
+        void *self = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);  // 优先 NOLOAD: 取已有句柄不再 mmap
+        if (!self) self = dlopen(info.dli_fname, RTLD_LAZY);
+        write(2, "[GumTrace] self-dlopen: ", 24);
+        write(2, info.dli_fname, strlen(info.dli_fname));
+        write(2, self ? " OK\n" : " FAIL\n", self ? 4 : 6);
     }
 }
 
