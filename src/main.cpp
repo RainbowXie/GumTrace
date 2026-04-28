@@ -8,6 +8,10 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data) {
     auto *instance = GumTrace::get_instance();
@@ -96,24 +100,49 @@ gboolean module_enumerate (GumModule * module, gpointer user_data) {
 // 导致后续无法用 Module.findExportByName 找到 init/run/unrun。
 // 解法: 在 entry 里用 dladdr 拿到自身路径,再 dlopen 一次让 refcount++,
 // Frida 的 dlclose 抵消不掉,dylib 保持加载,后续 JS 可以正常用。
+// 写一个 marker 文件到 app sandbox tmp 目录,用来证明 frida_entry 确实被 Frida 调用过
+// (stderr 输出在 Snapchat 进程里看不见,marker 文件可以从 JS File API 反向验证)
+static void write_entry_marker(const char *data) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/tmp/gumtrace_entry_called", home);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf),
+        "frida_entry invoked\n"
+        "data=%s\n"
+        "pid=%d\n",
+        data ? data : "<null>", getpid());
+    write(fd, buf, n);
+    close(fd);
+}
+
 extern "C" __attribute__((visibility("default")))
 void frida_entry(const char *data) {
-    const char *msg = "[GumTrace] frida_entry invoked\n";
-    write(2, msg, 31);
-    if (data && *data) {
-        write(2, "[GumTrace] data=", 16);
-        size_t len = 0; while (data[len] && len < 256) ++len;
-        write(2, data, len);
-        write(2, "\n", 1);
-    }
-    // 自 dlopen,防止 Frida fire-and-forget 路径 dlclose 后整个 dylib 被卸载
+    write_entry_marker(data);
+    write(2, "[GumTrace] frida_entry invoked\n", 31);
+    // 自 dlopen 让 dylib 在 Frida 自动 dlclose 后保持加载
     Dl_info info;
     if (dladdr((const void *)&frida_entry, &info) && info.dli_fname) {
-        void *self = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);  // 优先 NOLOAD: 取已有句柄不再 mmap
+        void *self = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
         if (!self) self = dlopen(info.dli_fname, RTLD_LAZY);
-        write(2, "[GumTrace] self-dlopen: ", 24);
-        write(2, info.dli_fname, strlen(info.dli_fname));
-        write(2, self ? " OK\n" : " FAIL\n", self ? 4 : 6);
+        // 把 self-dlopen 结果也记到 marker
+        const char *home = getenv("HOME");
+        if (home) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/tmp/gumtrace_entry_called", home);
+            int fd = open(path, O_WRONLY | O_APPEND, 0644);
+            if (fd >= 0) {
+                char buf[1024];
+                int n = snprintf(buf, sizeof(buf),
+                    "self-dlopen path=%s handle=%p\n",
+                    info.dli_fname, self);
+                write(fd, buf, n);
+                close(fd);
+            }
+        }
     }
 }
 
