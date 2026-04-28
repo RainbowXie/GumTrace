@@ -148,6 +148,7 @@ void frida_entry(const char *data) {
     }
     if (duration_ms < 100) duration_ms = 1500;
 
+#if PLATFORM_IOS
     // thread_id == 0 → 自动找主线程。当前 frida_entry 跑在 Frida 注入的临时线程上,
     // gum_stalker_follow_me 跟它对实际逻辑分析没意义,所以默认转发到主线程。
     if (thread_id == 0) {
@@ -164,6 +165,7 @@ void frida_entry(const char *data) {
             thread_id = (int)min_tid;
         }
     }
+#endif
 
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
     init(module_name, trace_path, thread_id, &opts);
