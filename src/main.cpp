@@ -176,8 +176,42 @@ void frida_entry(const char *data) {
 
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
     init(module_name, trace_path, thread_id, &opts);
-    run();
+    run();  // init/run 用 thread_id (auto-detected main) 做"主" follow
+
+#if PLATFORM_IOS
+    // 额外 follow 所有其他线程: attestation 多在后台 worker queue,光跟 main 抓不到。
+    // 注意: 不要 follow 自己 (frida_entry 线程,跑 usleep 没意义) 和 thread_id (run 已经 follow)。
+    auto inst = GumTrace::get_instance();
+    mach_port_t self_tid = mach_thread_self();
+    thread_act_array_t threads = nullptr;
+    mach_msg_type_number_t count = 0;
+    bool extra_followed[256] = {false};
+    unsigned int extra_tids[256] = {0};
+    int extra_n = 0;
+    if (task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS) {
+        for (mach_msg_type_number_t i = 0; i < count && extra_n < 256; i++) {
+            unsigned int t = (unsigned int)threads[i];
+            if (t == (unsigned int)self_tid) continue;
+            if ((int)t == thread_id) continue;
+            gum_stalker_follow(inst->_stalker, (GumThreadId)t, inst->_transformer, nullptr);
+            extra_tids[extra_n] = t;
+            extra_followed[extra_n] = true;
+            extra_n++;
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_act_t));
+    }
+
     usleep(duration_ms * 1000);
+
+    for (int i = 0; i < extra_n; i++) {
+        if (extra_followed[i])
+            gum_stalker_unfollow(inst->_stalker, (GumThreadId)extra_tids[i]);
+    }
+    mach_port_deallocate(mach_task_self(), self_tid);
+#else
+    usleep(duration_ms * 1000);
+#endif
+
     unrun();
 }
 
