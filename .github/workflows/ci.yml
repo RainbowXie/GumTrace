@@ -64,9 +64,13 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf build_ios
+          # Xcode 16.4+ 上 -DCMAKE_OSX_SYSROOT=iphoneos 简称不再被 clang 解析
+          # ("no such sysroot directory: 'iphoneos'"),改用 xcrun 解析的绝对路径
+          IOS_SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Using iOS SDK at: $IOS_SDK_PATH"
           cmake -S . -B build_ios -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_SYSROOT="$IOS_SDK_PATH" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
 
