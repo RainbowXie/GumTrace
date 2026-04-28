@@ -12,6 +12,9 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <mach/mach.h>
+#include <mach/task.h>
+#include <mach/thread_act.h>
 
 gboolean module_symbols_cb(const GumSymbolDetails * details, gpointer user_data) {
     auto *instance = GumTrace::get_instance();
@@ -119,31 +122,89 @@ static void write_entry_marker(const char *data) {
     close(fd);
 }
 
+// 从主线程 task_threads enumerate 拿出 mach thread id (通常是第一个/最低端口号)
+static unsigned int find_main_thread_id() {
+    thread_act_array_t threads = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return 0;
+    // 找最小的 thread port,通常是主线程
+    unsigned int main_tid = 0;
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+        unsigned int t = (unsigned int)threads[i];
+        if (main_tid == 0 || t < main_tid) main_tid = t;
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_act_t));
+    return main_tid;
+}
+
+// frida_entry: Frida 是 fire-and-forget,entry 返回后 dylib 立即被 dlclose。
+// 所以必须把 init+run+sleep+unrun 全在 entry 里做完,trace 文件落地后才返回。
+//
+// data 参数格式 (pipe 分隔,空字段用默认值):
+//   "module_name|trace_path|duration_ms|thread_id"
+// 例:
+//   "libcorecrypto.dylib||1500|"      → trace libcorecrypto, 默认路径, 1.5s, 主线程
+//   "libcorecrypto.dylib|/tmp/x.log|2000|0"  → 明确指定全部
 extern "C" __attribute__((visibility("default")))
 void frida_entry(const char *data) {
     write_entry_marker(data);
     write(2, "[GumTrace] frida_entry invoked\n", 31);
-    // 自 dlopen 让 dylib 在 Frida 自动 dlclose 后保持加载
-    Dl_info info;
-    if (dladdr((const void *)&frida_entry, &info) && info.dli_fname) {
-        void *self = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
-        if (!self) self = dlopen(info.dli_fname, RTLD_LAZY);
-        // 把 self-dlopen 结果也记到 marker
-        const char *home = getenv("HOME");
-        if (home) {
-            char path[1024];
-            snprintf(path, sizeof(path), "%s/tmp/gumtrace_entry_called", home);
-            int fd = open(path, O_WRONLY | O_APPEND, 0644);
-            if (fd >= 0) {
-                char buf[1024];
-                int n = snprintf(buf, sizeof(buf),
-                    "self-dlopen path=%s handle=%p\n",
-                    info.dli_fname, self);
-                write(fd, buf, n);
-                close(fd);
-            }
+
+    // 默认值
+    char module_name[256] = "libcorecrypto.dylib";
+    char trace_path[1024];
+    int duration_ms = 1500;
+    int thread_id = 0;
+
+    const char *home = getenv("HOME");
+    snprintf(trace_path, sizeof(trace_path), "%s/Documents/smoke_trace.log",
+             home ? home : "/tmp");
+
+    // 解析 data
+    if (data && *data) {
+        char buf[2048];
+        snprintf(buf, sizeof(buf), "%s", data);
+        char *parts[4] = {nullptr, nullptr, nullptr, nullptr};
+        int idx = 0;
+        char *tok = buf;
+        char *p = buf;
+        while (*p && idx < 4) {
+            if (*p == '|') { *p = 0; parts[idx++] = tok; tok = p + 1; }
+            p++;
+        }
+        if (idx < 4) parts[idx++] = tok;
+        if (parts[0] && *parts[0]) snprintf(module_name, sizeof(module_name), "%s", parts[0]);
+        if (parts[1] && *parts[1]) snprintf(trace_path, sizeof(trace_path), "%s", parts[1]);
+        if (parts[2] && *parts[2]) duration_ms = atoi(parts[2]);
+        if (parts[3] && *parts[3]) thread_id = atoi(parts[3]);
+    }
+    if (duration_ms < 100) duration_ms = 1500;
+
+    // thread_id == 0 时自动找主线程 (current thread = Frida 注入线程对 trace 没意义)
+    if (thread_id == 0) {
+        thread_id = (int)find_main_thread_id();
+    }
+
+    // 写 entry 详细 config 到 marker
+    if (home) {
+        char marker[1024];
+        snprintf(marker, sizeof(marker), "%s/tmp/gumtrace_entry_called", home);
+        int fd = open(marker, O_WRONLY | O_APPEND, 0644);
+        if (fd >= 0) {
+            char b[1024];
+            int n = snprintf(b, sizeof(b),
+                "config: module=%s trace=%s duration_ms=%d tid=%d\n",
+                module_name, trace_path, duration_ms, thread_id);
+            write(fd, b, n);
+            close(fd);
         }
     }
+
+    GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
+    init(module_name, trace_path, thread_id, &opts);
+    run();
+    usleep(duration_ms * 1000);
+    unrun();
 }
 
 extern "C" __attribute__((visibility("default")))
