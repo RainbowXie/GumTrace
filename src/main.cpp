@@ -101,29 +101,61 @@ extern "C" void init(const char *module_names, char *trace_file_path, int thread
 extern "C" void run();
 extern "C" void unrun();
 
-// 在 hide-jb / 受 sandbox 限制的 iOS app 里,标准 dlopen 加载本 dylib 失败:
-// app sandbox 拒绝从 Documents/Library/tmp 等可写路径 mmap-exec,且 /var/jb 路径
-// 被 hide-jb 隐藏。绕过办法是用 Frida Device.inject_library_blob/file —— 它通过
-// task_for_pid + mach VM 把 dylib 直接 map 进目标进程,完全不走 dyld 的文件路径检查。
-//
-// inject API 要求一个 entry 函数,签名 void(const char *data)。Frida 是 fire-and-forget:
-// entry 返回后 dylib 立即被 dlclose,而且 mach-VM 注入的 dylib 不在 dyld 的 image
-// 列表里(Module.findExportByName 找不到),所以无法从外部 JS 控制后续 init/run/unrun。
-// 唯一可行模式: entry 里同步把 init/run/sleep/unrun 一气呵成做完,trace 文件落地后再返回。
-//
-// data 参数格式 (pipe 分隔,空字段用默认值):
-//   "module_name|trace_path|duration_ms|thread_id"
+// hook-driven trace: 只在 target 函数被命中时启 trace,onLeave 收 trace
+// 这样 trace 范围聚焦在 target 函数执行期间,匹配 example_ios.js 的标准用法。
+
+static GumInterceptor *g_interceptor = nullptr;
+
+typedef struct _HookListener {
+    GObject parent;
+} HookListener;
+
+typedef struct _HookListenerClass {
+    GObjectClass parent_class;
+} HookListenerClass;
+
+static void hook_listener_iface_init(gpointer g_iface, gpointer iface_data);
+
+#define HOOK_TYPE_LISTENER (hook_listener_get_type())
+G_DEFINE_TYPE_EXTENDED(HookListener, hook_listener, G_TYPE_OBJECT, 0,
+    G_IMPLEMENT_INTERFACE(GUM_TYPE_INVOCATION_LISTENER, hook_listener_iface_init))
+
+static void hook_listener_init(HookListener *self) {}
+static void hook_listener_class_init(HookListenerClass *klass) {}
+
+static void on_enter(GumInvocationListener *listener, GumInvocationContext *ctx) {
+    // Snapchat 命中 target 函数 → 启 trace (follow_me = 当前线程)
+    run();
+}
+static void on_leave(GumInvocationListener *listener, GumInvocationContext *ctx) {
+    // 函数返回 → 停 trace
+    // 但 unrun 会 close 文件,多次进出会重新打开 truncate。
+    // 改为只 unfollow_me,文件保留累积 trace,frida_entry 退出时统一 close。
+    auto inst = GumTrace::get_instance();
+    if (inst->trace_thread_id > 0) gum_stalker_unfollow(inst->_stalker, inst->trace_thread_id);
+    else gum_stalker_unfollow_me(inst->_stalker);
+    if (inst->trace_file.is_open()) {
+        inst->trace_file.write(inst->buffer, inst->buffer_offset);
+        inst->buffer_offset = 0;
+        inst->trace_file.flush();
+    }
+}
+
+static void hook_listener_iface_init(gpointer g_iface, gpointer iface_data) {
+    GumInvocationListenerInterface *iface = (GumInvocationListenerInterface *) g_iface;
+    iface->on_enter = on_enter;
+    iface->on_leave = on_leave;
+}
+
+// data 格式: "module_name|trace_path|target_offset_hex|wait_seconds"
 // 例:
-//   "Snapchat||3000|"               → trace Snapchat 主二进制, 默认路径, 3s, 主线程
-//   "libcorecrypto.dylib|/tmp/t|2000|259"  → 全部明确
-//
-// thread_id == 0 时自动取 task_threads 里最低 mach 端口号(通常是主线程)。
+//   "Snapchat||7DC1F0|30"   trace 文件默认 sandbox/Documents,hook Snapchat+0x7DC1F0,等 30s
 extern "C" __attribute__((visibility("default")))
 void frida_entry(const char *data) {
-    char module_name[256] = "libcorecrypto.dylib";
+    char module_name[256] = "Snapchat";
     char trace_path[1024];
-    int duration_ms = 1500;
-    int thread_id = 0;
+    char target_offset_hex[32] = "7DC1F0";  // sub_1007DC1F0 prebuf_v2_encrypt (anti-tamper immune)
+    int wait_seconds = 30;
 
     const char *home = getenv("HOME");
     snprintf(trace_path, sizeof(trace_path), "%s/Documents/gumtrace_inject.log",
@@ -143,76 +175,51 @@ void frida_entry(const char *data) {
         if (idx < 4) parts[idx++] = tok;
         if (parts[0] && *parts[0]) snprintf(module_name, sizeof(module_name), "%s", parts[0]);
         if (parts[1] && *parts[1]) snprintf(trace_path, sizeof(trace_path), "%s", parts[1]);
-        if (parts[2] && *parts[2]) duration_ms = atoi(parts[2]);
-        if (parts[3] && *parts[3]) thread_id = atoi(parts[3]);
+        if (parts[2] && *parts[2]) snprintf(target_offset_hex, sizeof(target_offset_hex), "%s", parts[2]);
+        if (parts[3] && *parts[3]) wait_seconds = atoi(parts[3]);
     }
-    if (duration_ms < 100) duration_ms = 1500;
+    if (wait_seconds < 1) wait_seconds = 30;
 
-#if PLATFORM_IOS
-    // thread_id == 0 → 自动找主线程。
-    // 关键: frida_entry 跑在 Frida 注入的临时线程上,而 mach port 在 Darwin 上是
-    // 复用 + 单调递增的,新 thread 的 port 可能比 Snapchat main 还小。所以不能直接取
-    // task_threads 的最小 port,要**先排除当前线程 (frida_entry 自己)** 再取最小。
-    // 不排除 self 会导致 Stalker 跟踪 frida_entry 自己的 usleep 循环 (在 libsystem
-    // 内部),完全看不到目标 app 的代码。
-    if (thread_id == 0) {
-        mach_port_t self_tid = mach_thread_self();
-        thread_act_array_t threads = nullptr;
-        mach_msg_type_number_t count = 0;
-        if (task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS) {
-            unsigned int min_tid = 0;
-            for (mach_msg_type_number_t i = 0; i < count; i++) {
-                unsigned int t = (unsigned int)threads[i];
-                if (t == (unsigned int)self_tid) continue;
-                if (min_tid == 0 || t < min_tid) min_tid = t;
-            }
-            vm_deallocate(mach_task_self(), (vm_address_t)threads,
-                          count * sizeof(thread_act_t));
-            thread_id = (int)min_tid;
-        }
-        mach_port_deallocate(mach_task_self(), self_tid);
-    }
-#endif
-
+    // init: 准备 trace state,thread_id=0 → follow_me 模式 (hook 触发线程被 follow)
     GUM_OPTIONS opts; memset(&opts, 0, sizeof(opts));
-    init(module_name, trace_path, thread_id, &opts);
-    run();  // init/run 用 thread_id (auto-detected main) 做"主" follow
+    init(module_name, trace_path, 0, &opts);
 
-#if PLATFORM_IOS
-    // 额外 follow 所有其他线程: attestation 多在后台 worker queue,光跟 main 抓不到。
-    // 注意: 不要 follow 自己 (frida_entry 线程,跑 usleep 没意义) 和 thread_id (run 已经 follow)。
+    // 计算 target 地址 = module base + offset
     auto inst = GumTrace::get_instance();
-    mach_port_t self_tid = mach_thread_self();
-    thread_act_array_t threads = nullptr;
-    mach_msg_type_number_t count = 0;
-    bool extra_followed[256] = {false};
-    unsigned int extra_tids[256] = {0};
-    int extra_n = 0;
-    if (task_threads(mach_task_self(), &threads, &count) == KERN_SUCCESS) {
-        for (mach_msg_type_number_t i = 0; i < count && extra_n < 256; i++) {
-            unsigned int t = (unsigned int)threads[i];
-            if (t == (unsigned int)self_tid) continue;
-            if ((int)t == thread_id) continue;
-            gum_stalker_follow(inst->_stalker, (GumThreadId)t, inst->_transformer, nullptr);
-            extra_tids[extra_n] = t;
-            extra_followed[extra_n] = true;
-            extra_n++;
-        }
-        vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_act_t));
+    auto it = inst->modules.find(module_name);
+    if (it == inst->modules.end()) {
+        // module 没 init 上 (找不到),啥都做不了
+        unrun();
+        return;
     }
+    size_t base = it->second.at("base");
+    size_t offset = strtoul(target_offset_hex, nullptr, 16);
+    void *target = (void *)(base + offset);
 
-    usleep(duration_ms * 1000);
+    // gum_interceptor_attach
+    g_interceptor = gum_interceptor_obtain();
+    HookListener *listener = (HookListener *)g_object_new(HOOK_TYPE_LISTENER, NULL);
+    gum_interceptor_begin_transaction(g_interceptor);
+    gum_interceptor_attach(g_interceptor, target,
+                           GUM_INVOCATION_LISTENER(listener), nullptr,
+                           GUM_ATTACH_FLAGS_NONE);
+    gum_interceptor_end_transaction(g_interceptor);
 
-    for (int i = 0; i < extra_n; i++) {
-        if (extra_followed[i])
-            gum_stalker_unfollow(inst->_stalker, (GumThreadId)extra_tids[i]);
+    // 等待 hook 触发 (用户在屏幕上走流程触发 attestation)
+    sleep(wait_seconds);
+
+    // detach + cleanup
+    gum_interceptor_detach(g_interceptor, GUM_INVOCATION_LISTENER(listener));
+    g_object_unref(listener);
+    g_object_unref(g_interceptor);
+
+    // close trace file (write final buffer + flush)
+    if (inst->trace_file.is_open()) {
+        inst->trace_file.write(inst->buffer, inst->buffer_offset);
+        inst->buffer_offset = 0;
+        inst->trace_file.flush();
+        inst->trace_file.close();
     }
-    mach_port_deallocate(mach_task_self(), self_tid);
-#else
-    usleep(duration_ms * 1000);
-#endif
-
-    unrun();
 }
 
 extern "C" __attribute__((visibility("default")))
