@@ -8,6 +8,9 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
+#include <fcntl.h>
+#include <stdio.h>
 #if PLATFORM_IOS
 #include <mach/mach.h>
 #include <mach/task.h>
@@ -123,7 +126,10 @@ G_DEFINE_TYPE_EXTENDED(HookListener, hook_listener, G_TYPE_OBJECT, 0,
 static void hook_listener_init(HookListener *self) {}
 static void hook_listener_class_init(HookListenerClass *klass) {}
 
+static std::atomic<unsigned long> g_hook_fire_count(0);
+
 static void on_enter(GumInvocationListener *listener, GumInvocationContext *ctx) {
+    g_hook_fire_count.fetch_add(1, std::memory_order_relaxed);
     // Snapchat 命中 target 函数 → 启 trace (follow_me = 当前线程)
     run();
 }
@@ -200,10 +206,23 @@ void frida_entry(const char *data) {
     g_interceptor = gum_interceptor_obtain();
     HookListener *listener = (HookListener *)g_object_new(HOOK_TYPE_LISTENER, NULL);
     gum_interceptor_begin_transaction(g_interceptor);
-    gum_interceptor_attach(g_interceptor, target,
+    GumAttachReturn ar = gum_interceptor_attach(g_interceptor, target,
                            GUM_INVOCATION_LISTENER(listener), nullptr,
                            GUM_ATTACH_FLAGS_NONE);
     gum_interceptor_end_transaction(g_interceptor);
+
+    // 写 hook attach 状态到 marker (hide-jb ON 下没 stderr 可看)
+    if (home) {
+        char p[1024]; snprintf(p, sizeof(p), "%s/tmp/gumtrace_hook_status", home);
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            char b[256];
+            int n = snprintf(b, sizeof(b),
+                "module=%s base=0x%lx offset=0x%lx target=%p attach_result=%d wait=%ds\n",
+                module_name, (unsigned long)base, (unsigned long)offset, target, ar, wait_seconds);
+            write(fd, b, n); close(fd);
+        }
+    }
 
     // 等待 hook 触发 (用户在屏幕上走流程触发 attestation)
     sleep(wait_seconds);
@@ -219,6 +238,17 @@ void frida_entry(const char *data) {
         inst->buffer_offset = 0;
         inst->trace_file.flush();
         inst->trace_file.close();
+    }
+
+    // dump hook fire count (确认 attestation 是否走过 target)
+    if (home) {
+        char p[1024]; snprintf(p, sizeof(p), "%s/tmp/gumtrace_hook_status", home);
+        int fd = open(p, O_WRONLY | O_APPEND, 0644);
+        if (fd >= 0) {
+            char b[64];
+            int n = snprintf(b, sizeof(b), "hook_fire_count=%lu\n", g_hook_fire_count.load());
+            write(fd, b, n); close(fd);
+        }
     }
 }
 
